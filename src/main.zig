@@ -8,15 +8,23 @@ const allocator = gpa.allocator();
 
 const DB_FILE = "database.json";
 
+// Data Structure (Updated)
 const LinkData = struct {
     url: []const u8,
     timestamp: i64,
+    clicks: u64 = 0,
+    expires_at: i64 = 0, // 0 means never
+    password: ?[]const u8 = null,
 };
 
+// Entry for JSON Serialization
 const LinkEntry = struct {
     code: []const u8,
     url: []const u8,
     timestamp: i64,
+    clicks: u64,
+    expires_at: i64,
+    password: ?[]const u8,
 };
 
 var db: std.StringHashMap(LinkData) = undefined;
@@ -31,41 +39,41 @@ pub fn main() !void {
     var server = try loopback.listen(.{ .reuse_address = true });
     defer server.deinit();
 
-    std.debug.print("ZigLink Server Running\n", .{});
+    std.debug.print("ZigLink Server Running on Port 8081\n", .{});
 
     while (true) {
         const connection = try server.accept();
         defer connection.stream.close();
 
-        var buffer: [4096]u8 = undefined;
+        var buffer: [8192]u8 = undefined; // Increased buffer
         const size = try connection.stream.read(&buffer);
+        if (size == 0) continue;
         const request_text = buffer[0..size];
 
         if (isBot(request_text)) {
-            const bot_msg = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\": \"you can't because you're robot!\"}";
-            try connection.stream.writeAll(bot_msg);
+            try respond(connection.stream, 403, "application/json", "{\"error\": \"you can't because you're robot!\"}");
             continue;
         }
 
         var iter = std.mem.tokenizeAny(u8, request_text, " \r\n");
         const method = iter.next() orelse continue;
-        const path = iter.next() orelse continue;
+        const path_full = iter.next() orelse continue;
+
+        // Parse path and query
+        var path = path_full;
+        var query: ?[]const u8 = null;
+        if (std.mem.indexOf(u8, path_full, "?")) |idx| {
+            path = path_full[0..idx];
+            query = path_full[idx+1..];
+        }
 
         if (std.mem.eql(u8, path, "/auth/verify") and std.mem.eql(u8, method, "POST")) {
             try serveAuthCookie(connection.stream);
             continue;
         }
 
-        const is_protected = std.mem.eql(u8, path, "/info") or std.mem.eql(u8, path, "/api/shorten");
-        const has_cookie = std.mem.indexOf(u8, request_text, "zig_guard=passed") != null;
-
-        if (is_protected and !has_cookie) {
-            const deny_msg = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\": \"you can't because you're robot!\"}";
-            try connection.stream.writeAll(deny_msg);
-            continue;
-        }
-
-        if (std.mem.eql(u8, path, "/") or std.mem.startsWith(u8, path, "/?") or std.mem.startsWith(u8, path, "http")) {
+        // Static Files
+        if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
             try serveFile(connection.stream, "src/index.html");
         }
         else if (std.mem.eql(u8, path, "/og-image.png")) {
@@ -77,25 +85,171 @@ pub fn main() !void {
         else if (std.mem.eql(u8, path, "/info")) {
             try serveJsonStats(connection.stream);
         }
+        // API Shorten
         else if (std.mem.eql(u8, path, "/api/shorten") and std.mem.eql(u8, method, "POST")) {
             if (std.mem.indexOf(u8, request_text, "\r\n\r\n")) |body_start| {
                 const body = request_text[body_start + 4 ..];
                 try handleShorten(connection.stream, body);
             }
-        } 
+        }
+        // API Stats
+        else if (std.mem.startsWith(u8, path, "/api/stats/")) {
+            const code = path[11..];
+            try handleGetStats(connection.stream, code);
+        }
+        // Redirect Logic
         else {
             if (path.len > 1) {
                 const code = path[1..]; 
-                if (db.get(code)) |data| {
-                    try serveRedirect(connection.stream, data.url);
+                if (db.getPtr(code)) |data| {
+                    try handleRedirectFlow(connection.stream, data, query);
                 } else {
-                    try serve404(connection.stream);
+                    try respond(connection.stream, 404, "application/json", "{\"error\":\"Link not found\"}");
                 }
             } else {
-                try serve404(connection.stream);
+                try respond(connection.stream, 404, "application/json", "{\"error\":\"Not found\"}");
             }
         }
     }
+}
+
+fn handleRedirectFlow(stream: net.Stream, data: *LinkData, query: ?[]const u8) !void {
+    const now = std.time.timestamp();
+
+    // 1. Check Expiry
+    if (data.expires_at > 0 and now > data.expires_at) {
+        try respond(stream, 410, "text/html", "<h1>Link Expired</h1><p>This link is no longer available.</p>");
+        return;
+    }
+
+    // 2. Check Password
+    if (data.password) |pass| {
+        var provided_pass: ?[]const u8 = null;
+        
+        // Simple query param parser for ?pwd=...
+        if (query) |q| {
+            if (std.mem.indexOf(u8, q, "pwd=")) |idx| {
+                provided_pass = q[idx+4..];
+                // Handle multiple params basic trim
+                if (std.mem.indexOf(u8, provided_pass.?, "&")) |end| {
+                    provided_pass = provided_pass.?[0..end];
+                }
+            }
+        }
+
+        if (provided_pass == null or !std.mem.eql(u8, provided_pass.?, pass)) {
+            // Serve Password Page
+            const html = 
+                \<!DOCTYPE html>
+                \<html><head><title>Password Protected</title>
+                \<meta name="viewport" content="width=device-width, initial-scale=1">
+                \<style>body{font-family:sans-serif;background:#09090b;color:white;display:flex;justify-content:center;align-items:center;height:100vh;margin:0} .card{background:#18181b;padding:30px;border-radius:15px;text-align:center;border:1px solid #333} input{padding:10px;border-radius:5px;border:none;margin-top:10px;width:100%;box-sizing:border-box} button{margin-top:10px;padding:10px 20px;background:#ff5500;border:none;color:white;border-radius:5px;cursor:pointer;width:100%;font-weight:bold}</style>
+                \</head><body>
+                \<div class="card">
+                \<h2>🔒 Locked Link</h2>
+                \<p>Enter password to continue:</p>
+                \<form method="GET"><input type="password" name="pwd" placeholder="Password" required><button>Unlock</button></form>
+                \</div></body></html>
+            ;
+            try respond(stream, 200, "text/html", html);
+            return;
+        }
+    }
+
+    // 3. Success: Increment Stats & Redirect
+    data.clicks += 1;
+    saveDB() catch {}; 
+
+    const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 301 Moved Permanently\r\nLocation: {s}\r\n\r\n", .{data.url});
+    defer allocator.free(response);
+    try stream.writeAll(response);
+}
+
+fn handleShorten(stream: net.Stream, body: []const u8) !void {
+    const ParsedBody = struct {
+        url: []const u8,
+        alias: ?[]const u8 = null,
+        password: ?[]const u8 = null,
+        ttl: ?[]const u8 = null,
+    };
+
+    const parsed = std.json.parseFromSlice(ParsedBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        try respond(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    if (req.url.len == 0 or std.mem.indexOf(u8, req.url, " ") != null or (!std.mem.startsWith(u8, req.url, "http://") and !std.mem.startsWith(u8, req.url, "https://"))) {
+        try respond(stream, 403, "application/json", "{\"error\":\"Invalid URL format\"}");
+        return;
+    }
+
+    var expires_at: i64 = 0;
+    if (req.ttl) |ttl_str| {
+        if (std.fmt.parseInt(i64, ttl_str, 10)) |mins| {
+            if (mins > 0) expires_at = std.time.timestamp() + (mins * 60);
+        } else |_| {} 
+    }
+
+    var password_copy: ?[]const u8 = null;
+    if (req.password) |p| {
+        if (p.len > 0) password_copy = try allocator.dupe(u8, p);
+    }
+
+    var code: []const u8 = undefined;
+    if (req.alias) |alias_raw| {
+        if (alias_raw.len > 0) {
+            const alias = try slugify(allocator, alias_raw);
+            if (db.contains(alias)) {
+                allocator.free(alias);
+                if (password_copy) |p| allocator.free(p);
+                try respond(stream, 409, "application/json", "{\"error\":\"Alias taken\"}");
+                return;
+            }
+            code = alias;
+        } else {
+            code = try generateCode();
+        }
+    } else {
+        code = try generateCode();
+    }
+
+    const new_data = LinkData{
+        .url = try allocator.dupe(u8, req.url),
+        .timestamp = std.time.timestamp(),
+        .clicks = 0,
+        .expires_at = expires_at,
+        .password = password_copy,
+    };
+    try db.put(code, new_data);
+    saveDB() catch {};
+
+    const response = try std.fmt.allocPrint(allocator, 
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{{\"short_code\": \"{s}\"}}", 
+        .{code});
+    defer allocator.free(response);
+    try stream.writeAll(response);
+}
+
+fn handleGetStats(stream: net.Stream, code: []const u8) !void {
+    if (db.get(code)) |data| {
+        const resp = try std.fmt.allocPrint(allocator, 
+            "{s}", 
+            .{data.url});
+        defer allocator.free(resp);
+        try respond(stream, 200, "application/json", resp);
+    } else {
+        try respond(stream, 404, "application/json", "{\"error\":\"Link not found\"}");
+    }
+}
+
+fn respond(stream: net.Stream, code: u16, ctype: []const u8, body: []const u8) !void {
+    const status = switch(code) { 200=>"OK", 301=>"Moved Permanently", 400=>"Bad Request", 403=>"Forbidden", 404=>"Not Found", 409=>"Conflict", 410=>"Gone", else=>"Error" };
+    const header = try std.fmt.allocPrint(allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", .{code, status, ctype});
+    defer allocator.free(header);
+    try stream.writeAll(header);
+    try stream.writeAll(body);
 }
 
 fn isBot(request: []const u8) bool {
@@ -103,27 +257,18 @@ fn isBot(request: []const u8) bool {
         const start = idx + 12;
         const end = std.mem.indexOfPos(u8, request, start, "\r\n") orelse request.len;
         const ua = request[start..end];
-        if (std.mem.indexOf(u8, ua, "curl") != null) return true;
-        if (std.mem.indexOf(u8, ua, "wget") != null) return true;
-        if (std.mem.indexOf(u8, ua, "Postman") != null) return true;
-        if (std.mem.indexOf(u8, ua, "python") != null) return true;
-        if (std.mem.indexOf(u8, ua, "axios") != null) return true;
-        if (std.mem.indexOf(u8, ua, "Go-http-client") != null) return true;
-        if (std.mem.indexOf(u8, ua, "Java") != null) return true;
+        const bots = [_][]const u8{"curl", "wget", "python", "axios", "Go-http", "Java"};
+        for (bots) |b| { if (std.mem.indexOf(u8, ua, b) != null) return true; }
     }
     return false;
 }
 
 fn serveAuthCookie(stream: net.Stream) !void {
-    const header = "HTTP/1.1 200 OK\r\nSet-Cookie: zig_guard=passed; Path=/; HttpOnly; Max-Age=86400\r\nContent-Length: 2\r\n\r\nOK";
-    try stream.writeAll(header);
+    try stream.writeAll("HTTP/1.1 200 OK\r\nSet-Cookie: zig_guard=passed; Path=/; HttpOnly; Max-Age=86400\r\n\r\nOK");
 }
 
 fn loadDB() !void {
-    const file = std.fs.cwd().openFile(DB_FILE, .{}) catch |err| {
-        if (err == error.FileNotFound) return;
-        return err;
-    };
+    const file = std.fs.cwd().openFile(DB_FILE, .{}) catch return;
     defer file.close();
     const stat = try file.stat();
     if (stat.size == 0) return;
@@ -133,7 +278,9 @@ fn loadDB() !void {
     defer parsed.deinit();
     for (parsed.value) |item| {
         const key = try allocator.dupe(u8, item.code);
-        const val = LinkData{ .url = try allocator.dupe(u8, item.url), .timestamp = item.timestamp };
+        var pass: ?[]const u8 = null;
+        if (item.password) |p| pass = try allocator.dupe(u8, p);
+        const val = LinkData{ .url = try allocator.dupe(u8, item.url), .timestamp = item.timestamp, .clicks = item.clicks, .expires_at = item.expires_at, .password = pass };
         try db.put(key, val);
     }
 }
@@ -145,156 +292,43 @@ fn saveDB() !void {
     defer list.deinit();
     var iter = db.iterator();
     while (iter.next()) |entry| {
-        try list.append(LinkEntry{ .code = entry.key_ptr.*, .url = entry.value_ptr.url, .timestamp = entry.value_ptr.timestamp });
+        try list.append(LinkEntry{ .code = entry.key_ptr.*, .url = entry.value_ptr.url, .timestamp = entry.value_ptr.timestamp, .clicks = entry.value_ptr.clicks, .expires_at = entry.value_ptr.expires_at, .password = entry.value_ptr.password });
     }
     try std.json.stringify(list.items, .{ .whitespace = .indent_2 }, file.writer());
 }
 
 fn serveFile(stream: net.Stream, path: []const u8) !void {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        try serve404(stream);
-        return;
-    };
+    const file = std.fs.cwd().openFile(path, .{}) catch { try respond(stream, 404, "text/plain", "Not Found"); return; };
     defer file.close();
     const content = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content);
-    const header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n";
-    try stream.writeAll(header);
-    try stream.writeAll(content);
+    try respond(stream, 200, "text/html", content);
 }
 
-fn serveImage(stream: net.Stream, path: []const u8, mime_type: []const u8) !void {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        try serve404(stream);
-        return;
-    };
+fn serveImage(stream: net.Stream, path: []const u8, mime: []const u8) !void {
+    const file = std.fs.cwd().openFile(path, .{}) catch { try respond(stream, 404, "text/plain", "Not Found"); return; };
     defer file.close();
     const content = try file.readToEndAlloc(allocator, 5 * 1024 * 1024);
     defer allocator.free(content);
-    const header = try std.fmt.allocPrint(allocator, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nConnection: close\r\n\r\n", .{mime_type});
-    defer allocator.free(header);
-    try stream.writeAll(header);
-    try stream.writeAll(content);
+    try respond(stream, 200, mime, content);
 }
 
 fn serveJsonStats(stream: net.Stream) !void {
-    var links_json = std.ArrayList(u8).init(allocator);
-    defer links_json.deinit();
-    try links_json.appendSlice("[");
-    var db_iter = db.iterator();
-    var first = true;
-    while (db_iter.next()) |entry| {
-        if (!first) try links_json.appendSlice(","); 
-        first = false;
-        const item = try std.fmt.allocPrint(allocator, 
-            "{{\"code\":\"{s}\",\"url\":\"{s}\",\"created\":{d}}}", 
-            .{entry.key_ptr.*, entry.value_ptr.url, entry.value_ptr.timestamp}
-        );
-        defer allocator.free(item);
-        try links_json.appendSlice(item);
-    }
-    try links_json.appendSlice("]");
-    const count = db.count();
-    
-    // Info OS Basic
-    const info = sysinfo.collect(allocator) catch sysinfo.SystemInfo{
-        .distro="Unknown", .kernel="-", .arch="-", .hostname="-", .cpu_model="-",
-        .cpu_cores=0, .ram_total_mb=0, .ram_free_mb=0, .uptime_sec=0, .user="-"
-    };
-
-    const response_body = try std.fmt.allocPrint(allocator, 
-        "{{\"status\":\"online\",\"os\":{{\"distro\":\"{s}\",\"kernel\":\"{s}\",\"arch\":\"{s}\",\"hostname\":\"{s}\",\"cpu\":\"{s}\",\"cores\":{d},\"ram_total_mb\":{d},\"ram_free_mb\":{d},\"uptime_sec\":{d},\"user\":\"{s}\"}},\"total_links\":{d},\"data\":{s}}}", 
-        .{info.distro, info.kernel, info.arch, info.hostname, info.cpu_model, info.cpu_cores, info.ram_total_mb, info.ram_free_mb, info.uptime_sec, info.user, count, links_json.items}
-    );
-    defer allocator.free(response_body);
-    const header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
-    try stream.writeAll(header);
-    try stream.writeAll(response_body);
-}
-
-fn getJsonValue(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]const u8 {
-    const needle = try std.fmt.allocPrint(alloc, "\"{s}\":\"", .{key});
-    defer alloc.free(needle);
-    if (std.mem.indexOf(u8, json, needle)) |start_idx| {
-        const value_start = start_idx + needle.len;
-        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end_idx| {
-            return try alloc.dupe(u8, json[value_start..end_idx]);
-        }
-    }
-    return null;
+    const info = sysinfo.collect(allocator) catch sysinfo.SystemInfo{ .distro="Unknown", .kernel="-", .arch="-", .hostname="-", .cpu_model="-", .cpu_cores=0, .ram_total_mb=0, .ram_free_mb=0, .uptime_sec=0, .user="-" };
+    const body = try std.fmt.allocPrint(allocator, "{{\"status\":\"online\",\"total_links\":{d}, \"os_cpu\":\"{s}\"}}", .{db.count(), info.cpu_model});
+    defer allocator.free(body);
+    try respond(stream, 200, "application/json", body);
 }
 
 fn slugify(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
     const res = try alloc.dupe(u8, input);
-    for (res) |*c| {
-        if (c.* == ' ' or c.* == '/' or c.* == '\\') c.* = '-';
-    }
+    for (res) |*c| { if (c.* == ' ' or c.* == '/' or c.* == '\\') c.* = '-'; }
     return res;
 }
 
-fn handleShorten(stream: net.Stream, body: []const u8) !void {
-    const url = try getJsonValue(allocator, body, "url") orelse {
-        try stream.writeAll("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Missing URL field\"}");
-        return;
-    };
-    defer allocator.free(url);
-
-    // STRICT URL CHECK
-    if (std.mem.indexOf(u8, url, " ") != null or (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://"))) {
-        try stream.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Access Denied: Invalid URL format!\"}");
-        return;
-    }
-
-    const alias_opt = try getJsonValue(allocator, body, "alias");
-    var code: []const u8 = undefined;
-
-    if (alias_opt) |alias_raw| {
-        if (alias_raw.len > 0) {
-            const alias = try slugify(allocator, alias_raw);
-            allocator.free(alias_raw); 
-
-            if (db.contains(alias)) {
-                allocator.free(alias);
-                try stream.writeAll("HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Alias taken\"}");
-                return;
-            }
-            code = alias;
-        } else {
-            allocator.free(alias_raw);
-            code = try generateCode();
-        }
-    } else {
-        code = try generateCode();
-    }
-
-    const new_data = LinkData{
-        .url = try allocator.dupe(u8, url),
-        .timestamp = std.time.timestamp(),
-    };
-    try db.put(code, new_data);
-
-    saveDB() catch |err| {
-        std.debug.print("Error saving DB: {any}\n", .{err});
-    };
-
-    const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{{\"short_code\": \"{s}\"}}", .{code});
-    defer allocator.free(response);
-    try stream.writeAll(response);
-}
-
-fn serveRedirect(stream: net.Stream, url: []const u8) !void {
-    const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 301 Moved Permanently\r\nLocation: {s}\r\n\r\n", .{url});
-    defer allocator.free(response);
-    try stream.writeAll(response);
-}
-fn serve404(stream: net.Stream) !void {
-    try stream.writeAll("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Link not found\"}");
-}
 fn generateCode() ![]const u8 {
     const charset = "abcdefghijklmnopqrstuvwxyz0123456789";
-    var code = try allocator.alloc(u8, 10);
-    for (0..10) |i| {
-        code[i] = charset[std.crypto.random.intRangeAtMost(usize, 0, charset.len - 1)];
-    }
+    var code = try allocator.alloc(u8, 6);
+    for (0..6) |i| { code[i] = charset[std.crypto.random.intRangeAtMost(usize, 0, charset.len - 1)]; }
     return code;
 }
