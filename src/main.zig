@@ -114,7 +114,7 @@ pub fn main() !void {
                     try respond(connection.stream, 404, "application/json", "{\"error\":\"Link not found\"}");
                 }
             } else {
-                try respond(stream, 404, "application/json", "{\"error\":\"Not found\"}");
+                try respond(connection.stream, 404, "application/json", "{\"error\":\"Not found\"}");
             }
         }
     }
@@ -244,7 +244,7 @@ fn handleDelete(stream: net.Stream, code: []const u8, body: []const u8) !void {
 fn handleGetStats(stream: net.Stream, code: []const u8) !void {
     if (db.get(code)) |data| {
         const resp = try std.fmt.allocPrint(allocator, 
-            "{s}", 
+            "{{\"code\":\"{s}\",\"url\":\"{s}\",\"clicks\":{d},\"created\":{d},\"expires\":{d},\"protected\":{}}}", 
             .{code, data.url, data.clicks, data.timestamp, data.expires_at, data.password != null});
         defer allocator.free(resp);
         try respond(stream, 200, "application/json", resp);
