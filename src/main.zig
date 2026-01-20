@@ -1,7 +1,7 @@
 const std = @import("std");
 const net = std.net;
 const http = std.http;
-const sysinfo = @import("sysinfo.zig");
+const sysinfo = @import("utils/sysinfo.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
@@ -74,13 +74,13 @@ pub fn main() !void {
 
         // Static Files
         if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
-            try serveFile(connection.stream, "src/index.html");
+            try serveFile(connection.stream, "src/static/index.html");
         }
         else if (std.mem.eql(u8, path, "/og-image.png")) {
-            try serveImage(connection.stream, "src/og-image.png", "image/png");
+            try serveImage(connection.stream, "src/static/og-image.png", "image/png");
         }
         else if (std.mem.eql(u8, path, "/favicon.svg")) {
-            try serveImage(connection.stream, "src/favicon.svg", "image/svg+xml");
+            try serveImage(connection.stream, "src/static/favicon.svg", "image/svg+xml");
         }
         else if (std.mem.eql(u8, path, "/info")) {
             try serveJsonStats(connection.stream);
@@ -140,16 +140,16 @@ fn handleRedirectFlow(stream: net.Stream, data: *LinkData, query: ?[]const u8) !
         if (provided_pass == null or !std.mem.eql(u8, provided_pass.?, pass)) {
             // Serve Password Page
             const html = 
-                \<!DOCTYPE html>
-                \<html><head><title>Password Protected</title>
-                \<meta name="viewport" content="width=device-width, initial-scale=1">
-                \<style>body{font-family:sans-serif;background:#09090b;color:white;display:flex;justify-content:center;align-items:center;height:100vh;margin:0} .card{background:#18181b;padding:30px;border-radius:15px;text-align:center;border:1px solid #333} input{padding:10px;border-radius:5px;border:none;margin-top:10px;width:100%;box-sizing:border-box} button{margin-top:10px;padding:10px 20px;background:#ff5500;border:none;color:white;border-radius:5px;cursor:pointer;width:100%;font-weight:bold}</style>
-                \</head><body>
-                \<div class="card">
-                \<h2>🔒 Locked Link</h2>
-                \<p>Enter password to continue:</p>
-                \<form method="GET"><input type="password" name="pwd" placeholder="Password" required><button>Unlock</button></form>
-                \</div></body></html>
+                \\<!DOCTYPE html>
+                \\<html><head><title>Password Protected</title>
+                \\<meta name="viewport" content="width=device-width, initial-scale=1">
+                \\<style>body{font-family:sans-serif;background:#09090b;color:white;display:flex;justify-content:center;align-items:center;height:100vh;margin:0} .card{background:#18181b;padding:30px;border-radius:15px;text-align:center;border:1px solid #333} input{padding:10px;border-radius:5px;border:none;margin-top:10px;width:100%;box-sizing:border-box} button{margin-top:10px;padding:10px 20px;background:#ff5500;border:none;color:white;border-radius:5px;cursor:pointer;width:100%;font-weight:bold}</style>
+                \\</head><body>
+                \\<div class="card">
+                \\<h2>🔒 Locked Link</h2>
+                \\<p>Enter password to continue:</p>
+                \\<form method="GET"><input type="password" name="pwd" placeholder="Password" required><button>Unlock</button></form>
+                \\</div></body></html>
             ;
             try respond(stream, 200, "text/html", html);
             return;
@@ -235,8 +235,8 @@ fn handleShorten(stream: net.Stream, body: []const u8) !void {
 fn handleGetStats(stream: net.Stream, code: []const u8) !void {
     if (db.get(code)) |data| {
         const resp = try std.fmt.allocPrint(allocator, 
-            "{s}", 
-            .{data.url});
+            "{{\"code\":\"{s}\",\"url\":\"{s}\",\"clicks\":{d},\"created\":{d},\"expires\":{d},\"protected\":{}}}", 
+            .{code, data.url, data.clicks, data.timestamp, data.expires_at, data.password != null});
         defer allocator.free(resp);
         try respond(stream, 200, "application/json", resp);
     } else {
