@@ -138,20 +138,8 @@ fn handleRedirectFlow(stream: net.Stream, data: *LinkData, query: ?[]const u8) !
         }
 
         if (provided_pass == null or !std.mem.eql(u8, provided_pass.?, pass)) {
-            // Serve Password Page
-            const html = 
-                \\<!DOCTYPE html>
-                \\<html><head><title>Password Protected</title>
-                \\<meta name="viewport" content="width=device-width, initial-scale=1">
-                \\<style>body{font-family:sans-serif;background:#09090b;color:white;display:flex;justify-content:center;align-items:center;height:100vh;margin:0} .card{background:#18181b;padding:30px;border-radius:15px;text-align:center;border:1px solid #333} input{padding:10px;border-radius:5px;border:none;margin-top:10px;width:100%;box-sizing:border-box} button{margin-top:10px;padding:10px 20px;background:#ff5500;border:none;color:white;border-radius:5px;cursor:pointer;width:100%;font-weight:bold}</style>
-                \\</head><body>
-                \\<div class="card">
-                \\<h2>🔒 Locked Link</h2>
-                \\<p>Enter password to continue:</p>
-                \\<form method="GET"><input type="password" name="pwd" placeholder="Password" required><button>Unlock</button></form>
-                \\</div></body></html>
-            ;
-            try respond(stream, 200, "text/html", html);
+            // Serve Password Page from static file
+            try serveFile(stream, "src/static/password.html");
             return;
         }
     }

@@ -109,7 +109,15 @@
         .bento-card h3 .lucide { color: var(--primary); width: 20px; }
         .bento-card p { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin: 0; }
         .stat-highlight { font-family: var(--font-mono); font-size: 32px; font-weight: 700; color: var(--text); margin-top: 10px; display: block; }
-        footer { margin-top: 80px; border-top: 1px solid var(--border); padding: 40px 0; width: 100%; background: #010101; text-align: center; }
+        footer { 
+            margin-top: 80px; 
+            border-top: 1px solid var(--border); 
+            padding: 40px 0; 
+            width: 100%; 
+            background: var(--surface); /* Use surface color instead of hardcoded #010101 */
+            text-align: center; 
+            transition: background 0.3s, border-color 0.3s;
+        }
         .footer-links { display: flex; justify-content: center; gap: 24px; margin-bottom: 20px; }
         .footer-links a { color: var(--text-muted); text-decoration: none; font-size: 14px; transition: 0.2s; }
         .footer-links a:hover { color: var(--primary); }
