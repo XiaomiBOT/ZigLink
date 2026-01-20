@@ -111,10 +111,10 @@ pub fn main() !void {
                 if (db.getPtr(code)) |data| {
                     try handleRedirectFlow(connection.stream, data, query);
                 } else {
-                    try respond(connection.stream, 404, "application/json", "{\"error\":\"Link not found\"}");
+                    try serveFile(connection.stream, "src/static/404.html");
                 }
             } else {
-                try respond(connection.stream, 404, "application/json", "{\"error\":\"Not found\"}");
+                try serveFile(connection.stream, "src/static/404.html");
             }
         }
     }
@@ -141,14 +141,17 @@ fn handleRedirectFlow(stream: net.Stream, data: *LinkData, query: ?[]const u8) !
             return;
         }
     }
-    data.clicks += 1;
-    saveDB() catch {}; 
-    const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 301 Moved Permanently\r\nLocation: {s}\r\n\r\n", .{data.url});
-    defer allocator.free(response);
-    try stream.writeAll(response);
-}
-
-fn handleShorten(stream: net.Stream, body: []const u8) !void {
+        data.clicks += 1;
+        saveDB() catch {}; 
+    
+        // Use 302 Found (Temporary Redirect) instead of 301 to prevent browser caching
+        // This ensures that password and expiry checks are always executed on the server.
+        const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 302 Found\r\nLocation: {s}\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\n\r\n", .{data.url});
+        defer allocator.free(response);
+        try stream.writeAll(response);
+    }
+    
+    fn handleShorten(stream: net.Stream, body: []const u8) !void {
     const ParsedBody = struct {
         url: []const u8,
         alias: ?[]const u8 = null,
