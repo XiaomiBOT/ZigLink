@@ -8,13 +8,14 @@ const allocator = gpa.allocator();
 
 const DB_FILE = "database.json";
 
-// Data Structure (Updated)
+// Data Structure (Updated with delete_token)
 const LinkData = struct {
     url: []const u8,
     timestamp: i64,
     clicks: u64 = 0,
-    expires_at: i64 = 0, // 0 means never
+    expires_at: i64 = 0,
     password: ?[]const u8 = null,
+    token: ?[]const u8 = null, // Secret token to delete this link
 };
 
 // Entry for JSON Serialization
@@ -25,6 +26,7 @@ const LinkEntry = struct {
     clicks: u64,
     expires_at: i64,
     password: ?[]const u8,
+    token: ?[]const u8 = null,
 };
 
 var db: std.StringHashMap(LinkData) = undefined;
@@ -45,7 +47,7 @@ pub fn main() !void {
         const connection = try server.accept();
         defer connection.stream.close();
 
-        var buffer: [8192]u8 = undefined; // Increased buffer
+        var buffer: [8192]u8 = undefined;
         const size = try connection.stream.read(&buffer);
         if (size == 0) continue;
         const request_text = buffer[0..size];
@@ -59,7 +61,6 @@ pub fn main() !void {
         const method = iter.next() orelse continue;
         const path_full = iter.next() orelse continue;
 
-        // Parse path and query
         var path = path_full;
         var query: ?[]const u8 = null;
         if (std.mem.indexOf(u8, path_full, "?")) |idx| {
@@ -72,7 +73,7 @@ pub fn main() !void {
             continue;
         }
 
-        // Static Files
+        // Routing
         if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
             try serveFile(connection.stream, "src/static/index.html");
         }
@@ -85,19 +86,25 @@ pub fn main() !void {
         else if (std.mem.eql(u8, path, "/info")) {
             try serveJsonStats(connection.stream);
         }
-        // API Shorten
         else if (std.mem.eql(u8, path, "/api/shorten") and std.mem.eql(u8, method, "POST")) {
             if (std.mem.indexOf(u8, request_text, "\r\n\r\n")) |body_start| {
                 const body = request_text[body_start + 4 ..];
                 try handleShorten(connection.stream, body);
             }
         }
-        // API Stats
         else if (std.mem.startsWith(u8, path, "/api/stats/")) {
             const code = path[11..];
             try handleGetStats(connection.stream, code);
         }
-        // Redirect Logic
+        // DELETE API
+        else if (std.mem.startsWith(u8, path, "/api/delete/") and std.mem.eql(u8, method, "DELETE")) {
+            const code = path[12..];
+            if (std.mem.indexOf(u8, request_text, "\r\n\r\n")) |body_start| {
+                const body = request_text[body_start + 4 ..];
+                try handleDelete(connection.stream, code, body);
+            }
+        }
+        // Redirect
         else {
             if (path.len > 1) {
                 const code = path[1..]; 
@@ -107,7 +114,7 @@ pub fn main() !void {
                     try respond(connection.stream, 404, "application/json", "{\"error\":\"Link not found\"}");
                 }
             } else {
-                try respond(connection.stream, 404, "application/json", "{\"error\":\"Not found\"}");
+                try respond(stream, 404, "application/json", "{\"error\":\"Not found\"}");
             }
         }
     }
@@ -115,39 +122,27 @@ pub fn main() !void {
 
 fn handleRedirectFlow(stream: net.Stream, data: *LinkData, query: ?[]const u8) !void {
     const now = std.time.timestamp();
-
-    // 1. Check Expiry
     if (data.expires_at > 0 and now > data.expires_at) {
         try respond(stream, 410, "text/html", "<h1>Link Expired</h1><p>This link is no longer available.</p>");
         return;
     }
-
-    // 2. Check Password
     if (data.password) |pass| {
         var provided_pass: ?[]const u8 = null;
-        
-        // Simple query param parser for ?pwd=...
         if (query) |q| {
             if (std.mem.indexOf(u8, q, "pwd=")) |idx| {
                 provided_pass = q[idx+4..];
-                // Handle multiple params basic trim
                 if (std.mem.indexOf(u8, provided_pass.?, "&")) |end| {
                     provided_pass = provided_pass.?[0..end];
                 }
             }
         }
-
         if (provided_pass == null or !std.mem.eql(u8, provided_pass.?, pass)) {
-            // Serve Password Page from static file
             try serveFile(stream, "src/static/password.html");
             return;
         }
     }
-
-    // 3. Success: Increment Stats & Redirect
     data.clicks += 1;
     saveDB() catch {}; 
-
     const response = try std.fmt.allocPrint(allocator, "HTTP/1.1 301 Moved Permanently\r\nLocation: {s}\r\n\r\n", .{data.url});
     defer allocator.free(response);
     try stream.writeAll(response);
@@ -160,7 +155,6 @@ fn handleShorten(stream: net.Stream, body: []const u8) !void {
         password: ?[]const u8 = null,
         ttl: ?[]const u8 = null,
     };
-
     const parsed = std.json.parseFromSlice(ParsedBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
         try respond(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
@@ -203,27 +197,54 @@ fn handleShorten(stream: net.Stream, body: []const u8) !void {
         code = try generateCode();
     }
 
+    // Generate DELETE TOKEN
+    const del_token = try generateCode(); // 6 chars random string as token
+
     const new_data = LinkData{
         .url = try allocator.dupe(u8, req.url),
         .timestamp = std.time.timestamp(),
         .clicks = 0,
         .expires_at = expires_at,
         .password = password_copy,
+        .token = del_token
     };
     try db.put(code, new_data);
     saveDB() catch {};
 
     const response = try std.fmt.allocPrint(allocator, 
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{{\"short_code\": \"{s}\"}}", 
-        .{code});
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{{\"short_code\": \"{s}\", \"delete_token\": \"{s}\"}}", 
+        .{code, del_token});
     defer allocator.free(response);
     try stream.writeAll(response);
+}
+
+fn handleDelete(stream: net.Stream, code: []const u8, body: []const u8) !void {
+    const ParsedBody = struct { token: []const u8 };
+    const parsed = std.json.parseFromSlice(ParsedBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        try respond(stream, 400, "application/json", "{\"error\":\"Missing token\"}");
+        return;
+    };
+    defer parsed.deinit();
+    
+    if (db.getPtr(code)) |data| {
+        if (data.token) |t| {
+            if (std.mem.eql(u8, t, parsed.value.token)) {
+                // TOKEN MATCHES, DELETE!
+                _ = db.remove(code);
+                saveDB() catch {};
+                try respond(stream, 200, "application/json", "{\"status\":\"deleted\"}");
+                return;
+            }
+        }
+    }
+    
+    try respond(stream, 403, "application/json", "{\"error\":\"Invalid token or link not found\"}");
 }
 
 fn handleGetStats(stream: net.Stream, code: []const u8) !void {
     if (db.get(code)) |data| {
         const resp = try std.fmt.allocPrint(allocator, 
-            "{{\"code\":\"{s}\",\"url\":\"{s}\",\"clicks\":{d},\"created\":{d},\"expires\":{d},\"protected\":{}}}", 
+            "{s}", 
             .{code, data.url, data.clicks, data.timestamp, data.expires_at, data.password != null});
         defer allocator.free(resp);
         try respond(stream, 200, "application/json", resp);
@@ -232,6 +253,7 @@ fn handleGetStats(stream: net.Stream, code: []const u8) !void {
     }
 }
 
+// Helpers
 fn respond(stream: net.Stream, code: u16, ctype: []const u8, body: []const u8) !void {
     const status = switch(code) { 200=>"OK", 301=>"Moved Permanently", 400=>"Bad Request", 403=>"Forbidden", 404=>"Not Found", 409=>"Conflict", 410=>"Gone", else=>"Error" };
     const header = try std.fmt.allocPrint(allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", .{code, status, ctype});
@@ -268,7 +290,9 @@ fn loadDB() !void {
         const key = try allocator.dupe(u8, item.code);
         var pass: ?[]const u8 = null;
         if (item.password) |p| pass = try allocator.dupe(u8, p);
-        const val = LinkData{ .url = try allocator.dupe(u8, item.url), .timestamp = item.timestamp, .clicks = item.clicks, .expires_at = item.expires_at, .password = pass };
+        var tok: ?[]const u8 = null;
+        if (item.token) |t| tok = try allocator.dupe(u8, t);
+        const val = LinkData{ .url = try allocator.dupe(u8, item.url), .timestamp = item.timestamp, .clicks = item.clicks, .expires_at = item.expires_at, .password = pass, .token = tok };
         try db.put(key, val);
     }
 }
@@ -280,7 +304,7 @@ fn saveDB() !void {
     defer list.deinit();
     var iter = db.iterator();
     while (iter.next()) |entry| {
-        try list.append(LinkEntry{ .code = entry.key_ptr.*, .url = entry.value_ptr.url, .timestamp = entry.value_ptr.timestamp, .clicks = entry.value_ptr.clicks, .expires_at = entry.value_ptr.expires_at, .password = entry.value_ptr.password });
+        try list.append(LinkEntry{ .code = entry.key_ptr.*, .url = entry.value_ptr.url, .timestamp = entry.value_ptr.timestamp, .clicks = entry.value_ptr.clicks, .expires_at = entry.value_ptr.expires_at, .password = entry.value_ptr.password, .token = entry.value_ptr.token });
     }
     try std.json.stringify(list.items, .{ .whitespace = .indent_2 }, file.writer());
 }
