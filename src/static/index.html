@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ZigLink - Secure URL Shortener with Password & Expiry</title>
-    <meta name="title" content="ZigLink - Secure URL Shortener with Password & Expiry">
-    <meta name="description" content="Free, fast, and privacy-focused URL shortener. Features include password protection, self-destructing links (expiry), real-time click analytics, and custom aliases.">
+    <title>ZigLink - The Ultimate Secure URL Shortener</title>
+    <meta name="title" content="ZigLink - The Ultimate Secure URL Shortener">
+    <meta name="description" content="Transform long, ugly URLs into short, secure, and trackable links. Featuring password protection, auto-expiry, and real-time analytics. Free & Open Source.">
     <meta name="keywords" content="url shortener, link shortener, shorten url, password protected link, temporary link, expiring link, ziglink, secure link">
     <meta name="robots" content="index, follow">
     <meta name="author" content="Bang Syaii">
@@ -145,8 +145,8 @@
 </header>
 <div class="container">
     <div class="hero">
-        <h1>Shorten Links.<br><span>Expand Reach.</span></h1>
-        <p>The high-performance URL shortener with password protection, real-time analytics, and automatic link expiration.</p>
+        <h1>Simplify Links.<br><span>Amplify Impact.</span></h1>
+        <p>The next-gen URL shortener built for speed and security. Create password-protected links, set expiration dates, and track performance in real-time—all for free.</p>
     </div>
     <div class="shortener-card">
         <div class="input-group">
@@ -189,17 +189,17 @@
     </div>
     <div class="features">
         <div class="bento-card">
-            <h3><i data-lucide="bar-chart-3"></i> Total Links</h3>
+            <h3><i data-lucide="bar-chart-3"></i> Real-Time Analytics</h3>
             <span class="stat-highlight" id="totalLinks">0</span>
-            <p>URLs shortened and served globally.</p>
+            <p>Track your link performance instantly. See click counts grow in real-time as users engage with your content globally.</p>
         </div>
         <div class="bento-card">
-            <h3><i data-lucide="zap"></i> Blazing Fast</h3>
-            <p style="margin-top:10px;">Built with Zig for minimal latency and maximum throughput. No bloat, just pure speed.</p>
+            <h3><i data-lucide="zap"></i> Lightning Fast</h3>
+            <p style="margin-top:10px;">Powered by Zig, our engine delivers sub-millisecond redirects. No bloat, no lag—just pure, unadulterated speed for your users.</p>
         </div>
         <div class="bento-card">
-            <h3><i data-lucide="shield-check"></i> Security First</h3>
-            <p style="margin-top:10px;">Protect your links with passwords and set auto-expiry dates for sensitive sharing.</p>
+            <h3><i data-lucide="shield-check"></i> Enterprise Security</h3>
+            <p style="margin-top:10px;">Share sensitive data with confidence. Secure your links with custom passwords and set auto-destruction timers for total control.</p>
         </div>
     </div>
 </div>
@@ -325,11 +325,15 @@
         const list = document.getElementById('historyList');
         const history = JSON.parse(localStorage.getItem('zig_history') || '[]');
         if(history.length === 0) { list.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:20px;">No history yet.</div>'; return; }
-        list.innerHTML = history.map(item => `
+        list.innerHTML = history.map(item => {
+            const truncatedShort = item.short.length > 40 ? item.short.substring(0, 37) + '...' : item.short;
+            const truncatedOriginal = item.original.length > 50 ? item.original.substring(0, 47) + '...' : item.original;
+            
+            return `
             <div class="history-item">
                 <div class="link-info">
-                    <a href="${item.short}" target="_blank" class="link-short">${item.short.replace('https://','').replace('http://','')}</a>
-                    <span class="link-original">${item.original}</span>
+                    <a href="${item.short}" target="_blank" class="link-short">${truncatedShort}</a>
+                    <span class="link-original" title="${item.original}">${truncatedOriginal}</span>
                     <div class="meta-badges">
                         ${item.password ? '<span class="badge"><i data-lucide="lock" style="width:10px"></i> Protected</span>' : ''}
                         ${item.expiry ? `<span class="badge expiry-timer" data-expiry="${item.expiry}"><i data-lucide="clock" style="width:10px"></i> ...</span>` : ''}
@@ -342,7 +346,7 @@
                     <button class="btn-icon" onclick="deleteHistoryItem(${item.created})" title="Delete" style="color:#ef4444; border-color:rgba(239,68,68,0.2)"><i data-lucide="trash-2"></i></button>
                 </div>
             </div>
-        `).join('');
+        `;}).join('');
         lucide.createIcons();
         history.forEach(item => fetchStats(item.code));
         updateTimers();
@@ -407,7 +411,21 @@
             }
         } catch(e) {}
     }
-    function clearHistory() { if(confirm("Clear all history?")) { localStorage.removeItem('zig_history'); renderHistory(); } }
+        // --- Auto-Refresh Stats Logic ---
+        function refreshAllStats() {
+            const history = JSON.parse(localStorage.getItem('zig_history') || '[]');
+            history.forEach(item => fetchStats(item.code));
+        }
+        
+        // Poll stats every 5 seconds
+        setInterval(refreshAllStats, 5000);
+    
+        function clearHistory() {
+            if(confirm("Clear all history?")) {
+                localStorage.removeItem('zig_history');
+                renderHistory();
+            }
+        }
     function showToast(msg, type="success") {
         const t = document.getElementById('toast');
         t.innerText = msg;
